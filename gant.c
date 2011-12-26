@@ -20,6 +20,7 @@
 
 #include "antlib.h"
 #include "antdefs.h"
+#include "driver.h"
 
 #define DEBUG_OUT(level, ...) {if (dbg && level <= dbg){fprintf(stderr, "DEBUG(%d): ", level); fprintf(stderr, __VA_ARGS__); fprintf(stderr, " in line %d.\n", __LINE__);}}
 #define ERROR_OUT(...) {fprintf(stderr, "ERROR: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, " in line %d.\n", __LINE__);}
@@ -147,6 +148,8 @@ uchar *blast = 0;		// first time reading not initialized, but why it is working 
 int blsize = 0;
 int bused = 0;
 int lseq = -1;
+
+uint driver = SERDRIVER; // Use serial driver by default, USB if option given
 
 /* round a float as garmin does it! */
 /* shoot me for writing this! */
@@ -808,6 +811,7 @@ void usage(void)
 	 "       [ -r ] Reset the device\n"
 	 "       [ -n ] Do not write auth file\n"
 	 "       [ -z ] Do not pair\n"
+	 "       [ -2 ] Use USB Stick 2 driver (ignores -d)\n"
 	 "       [ -h ] This help\n",
 	 progname);
    /* *INDENT-ON* */
@@ -1328,7 +1332,7 @@ int main(int ac, char *av[])
 	 sprintf(authfile, "%s/.gant", getenv("HOME"));
    }
    progname = av[0];
-   while ((c = getopt(ac, av, "a:f:d:i:m:pvD:rnzh")) != -1)
+   while ((c = getopt(ac, av, "a:f:d:i:m:pvD:rnzh2")) != -1)
    {
       switch (c)
       {
@@ -1367,6 +1371,9 @@ int main(int ac, char *av[])
 	    break;
 	 case 'h':
 	    usage();
+   case '2':
+	    driver = USBDRIVER;
+			break;
 	 default:
 	    ERROR_OUT("unknown option %s", optarg);
 	    usage();
@@ -1381,7 +1388,12 @@ int main(int ac, char *av[])
 
    if (!ANT_Init(devnum, 0))	// should be 115200 but doesn't fit into a short
    {
-      ERROR_OUT("Open dev %d failed", devnum);
+			if(driver==SERDRIVER)
+			{
+				ERROR_OUT("Open dev %d failed", devnum);
+			} else {
+				ERROR_OUT("Error opening USB device");
+			}	
       exit(1);
    }
    ANT_ResetSystem();

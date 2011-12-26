@@ -13,6 +13,7 @@
 #define __declspec(X)
 
 #include "antdefs.h"
+#include "driver.h"
 //#include "antdefines.h"
 //#include "ANT_Interface.h"
 //#include "antmessage.h"
@@ -27,10 +28,6 @@
 #define uchar unsigned char
 
 #define hexval(c) ((c >= '0' && c <= '9') ? (c-'0') : ((c&0xdf)-'A'+10))
-
-#define SERDRIVER 0
-#define USBDRIVER 1
-#define DRIVER SERDRIVER
 
 static int fd = -1;
 static int dbg = 0;
@@ -93,7 +90,7 @@ msg_send(uchar mesg, uchar *inbuf, uchar len)
 		chk ^= inbuf[i];
 	}
 	buf[3+i] = chk;
-	if(DRIVER == USBDRIVER) {
+	if(driver == USBDRIVER) {
 		return msg_usb_send(buf, i, len);
 	} else {
 		return msg_serial_send(buf, i, len);
@@ -458,8 +455,14 @@ ANT_Init(uchar devno, ushort baud)
 {
 	char dev[40];
 
-	sprintf(dev, "/dev/ttyUSB%d", devno);
-	return ANT_Initf(dev, devno);
+	if(driver == SERDRIVER)
+	{
+		sprintf(dev, "/dev/ttyUSB%d", devno);
+		return ANT_Initf(dev, devno);
+  } else {
+	  // Stub for now
+		return 0;
+	}
 }
 
 uchar
