@@ -28,6 +28,10 @@
 
 #define hexval(c) ((c >= '0' && c <= '9') ? (c-'0') : ((c&0xdf)-'A'+10))
 
+#define SERDRIVER 0
+#define USBDRIVER 1
+#define DRIVER SERDRIVER
+
 static int fd = -1;
 static int dbg = 0;
 static pthread_t commthread;;
@@ -45,23 +49,18 @@ struct msg_queue {
 	uchar len;
 };
 
+// send message over USB port (dummy function)
+uchar
+msg_usb_send(uchar *buf, int i, int len)
+{
+	return 1;
+}
+
 // send message over serial port
 uchar
-msg_send(uchar mesg, uchar *inbuf, uchar len)
+msg_serial_send(uchar *buf, int i, int len)
 {
-	uchar buf[MAXMSG];
 	ssize_t nw;
-	int i;
-	uchar chk = MESG_TX_SYNC;
-
-	buf[0] = MESG_TX_SYNC;
-	buf[1] = len; chk ^= len;
-	buf[2] = mesg; chk ^= mesg;
-	for (i = 0; i < len; i++) {
-		buf[3+i] = inbuf[i];
-		chk ^= inbuf[i];
-	}
-	buf[3+i] = chk;
 	usleep(10*1000);
 	if (4+i != (nw=write(fd, buf, 4+i))) {
 		if (dbg) {
@@ -76,6 +75,29 @@ msg_send(uchar mesg, uchar *inbuf, uchar len)
 		putchar('\n');
 	}
 	return 1;
+}
+
+// send message over the correct port (either serial or raw USB)
+uchar
+msg_send(uchar mesg, uchar *inbuf, uchar len)
+{
+	uchar buf[MAXMSG];
+	int i;
+	uchar chk = MESG_TX_SYNC;
+
+	buf[0] = MESG_TX_SYNC;
+	buf[1] = len; chk ^= len;
+	buf[2] = mesg; chk ^= mesg;
+	for (i = 0; i < len; i++) {
+		buf[3+i] = inbuf[i];
+		chk ^= inbuf[i];
+	}
+	buf[3+i] = chk;
+	if(DRIVER == USBDRIVER) {
+		return msg_usb_send(buf, i, len);
+	} else {
+		return msg_serial_send(buf, i, len);
+	}
 }
 
 // two argument send
