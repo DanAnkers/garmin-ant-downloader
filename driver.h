@@ -1,5 +1,5 @@
-#ifndef __GANT_H__
-#define __GANT_H__
+#ifndef __DRIVER_H__
+#define __DRIVER_H__
 
 #define SERDRIVER 0
 #define USBDRIVER 1
