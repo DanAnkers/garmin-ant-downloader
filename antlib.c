@@ -9,6 +9,8 @@
 #include <pthread.h>
 #include <termios.h>
 #include <stdlib.h>
+#include <libusb-1.0/libusb.h>
+#include <poll.h>
 
 #define __declspec(X)
 
@@ -25,12 +27,24 @@
 #define MAXCHAN 32
 #define BSIZE 8*10000
 
+// USB read and write timeouts
+#define USB_R_TIMEOUT 500
+#define USB_W_TIMEOUT 500
+
 #define uchar unsigned char
 
 #define hexval(c) ((c >= '0' && c <= '9') ? (c-'0') : ((c&0xdf)-'A'+10))
 
+extern int dbg;
+#define DEBUG_OUT(level, ...) {if (dbg && level <= dbg){fprintf(stderr, "DEBUG(%d): ", level); fprintf(stderr, __VA_ARGS__); fprintf(stderr, " in line %d.\n", __LINE__);}}
+
+
 static int fd = -1;
-static int dbg = 0;
+static struct libusb_context *ctx;
+static struct libusb_device_handle *usb_handle;
+static int ep_in = 0;
+static int ep_out = 0;
+// static int dbg = 0;
 static pthread_t commthread;;
 
 static RESPONSE_FUNC rfn = 0;
@@ -46,39 +60,50 @@ struct msg_queue {
 	uchar len;
 };
 
-// send message over USB port (dummy function)
-uchar
-msg_usb_send(uchar *buf, int i, int len)
+// Read a raw message from the appropriate port
+int
+driver_read(uchar *buf, int size)
 {
-	return 1;
-}
-
-// send message over serial port
-uchar
-msg_serial_send(uchar *buf, int i, int len)
-{
-	ssize_t nw;
-	usleep(10*1000);
-	if (4+i != (nw=write(fd, buf, 4+i))) {
-		if (dbg) {
-			perror("failed write");
+	int xferstatus;
+	int bytesxferred;
+	if(driver == SERDRIVER) {
+		return read(fd, buf, size);
+	} else {
+		DEBUG_OUT(3, "Reading from USB");
+		xferstatus = libusb_bulk_transfer(usb_handle, ep_in, buf, size, &bytesxferred, USB_R_TIMEOUT);
+		DEBUG_OUT(3, "Finished read");
+		if(xferstatus < 0) {
+			DEBUG_OUT(1, "Read xferstatus: %d", xferstatus);
 		}
-	} else if (dbg == 2) {
-		// Wali: additional raw data output
-		printf(">>>\n    00000000:");
-		for (i = 0; i < (len + 4); i++) {
-			printf(" %02x", buf[i]);
-		}
-		putchar('\n');
+		return ((xferstatus == LIBUSB_SUCCESS || (xferstatus == LIBUSB_ERROR_TIMEOUT && bytesxferred > 0)) ? bytesxferred : xferstatus);
 	}
-	return 1;
 }
 
-// send message over the correct port (either serial or raw USB)
+// Write a raw message to the appropriate port
+int 
+driver_write(uchar *buf, int size)
+{
+	int xferstatus;
+	int bytesxferred;
+	if(driver == SERDRIVER) {
+		return write(fd, buf, size);
+	} else {
+		DEBUG_OUT(3, "Writing to USB");
+		xferstatus = libusb_bulk_transfer(usb_handle, ep_out, buf, size, &bytesxferred, USB_W_TIMEOUT);
+		DEBUG_OUT(3, "Finished write");
+		if(xferstatus < 0) {
+			DEBUG_OUT(1, "Write xferstatus: %d", xferstatus);
+		}
+		return ((xferstatus == LIBUSB_SUCCESS || (xferstatus == LIBUSB_ERROR_TIMEOUT&& bytesxferred > 0)) ? bytesxferred : xferstatus);
+	}
+}
+
+// Format and send a message
 uchar
 msg_send(uchar mesg, uchar *inbuf, uchar len)
 {
 	uchar buf[MAXMSG];
+	ssize_t nw;
 	int i;
 	uchar chk = MESG_TX_SYNC;
 
@@ -90,11 +115,20 @@ msg_send(uchar mesg, uchar *inbuf, uchar len)
 		chk ^= inbuf[i];
 	}
 	buf[3+i] = chk;
-	if(driver == USBDRIVER) {
-		return msg_usb_send(buf, i, len);
-	} else {
-		return msg_serial_send(buf, i, len);
+	usleep(10*1000);
+	if (4+i != (nw=driver_write(buf, 4+i))) {
+		if (dbg) {
+			perror("failed write");
+		}
+	} else if (dbg >= 2) {
+		// Wali: additional raw data output
+		printf(">>>\n    00000000:");
+		for (i = 0; i < (len + 4); i++) {
+			printf(" %02x", buf[i]);
+		}
+		putchar('\n');
 	}
+	return 1;
 }
 
 // two argument send
@@ -118,7 +152,7 @@ msg_send3(uchar mesg, uchar data1, uchar data2, uchar data3)
 	return msg_send(mesg, buf, 3);
 }
 
-void get_data(int fd)
+void get_data()
 {
 	static uchar buf[500];
 	static int bufc = 0;
@@ -132,7 +166,7 @@ void get_data(int fd)
 	int srch;
 	int next;
 
-	nr = read(fd, buf+bufc, 20);
+	nr = driver_read(buf+bufc, 20);
 	if (nr > 0)
 		bufc += nr;
 	else
@@ -147,7 +181,7 @@ void get_data(int fd)
 			fprintf(stderr, "%02x", buf[j]);
 		fprintf(stderr, "\n");
 		exit(1);
-	} else if (dbg == 2) {
+	} else if (dbg >= 2) {
 		// Wali: additional raw data output
 		printf("<<<\n    00000000:");
 		for (i = 0; i < bufc; i++) {
@@ -382,6 +416,34 @@ void get_data(int fd)
 		bufc = 0;
 }
 
+void *commfn_usb(void* arg)
+{
+	int ready;
+	const struct libusb_pollfd** usb_pollfds;
+	struct pollfd* fds;
+	int i, nfd;
+
+	// libusb isn't really written with select() in mind so use poll()
+	usb_pollfds = libusb_get_pollfds(ctx);
+	nfd = 0;
+	for(i=0; usb_pollfds[i] != NULL; i++) {
+		nfd++;
+	}
+	fds = calloc(sizeof(struct pollfd), nfd);
+	for(i = 0; i < nfd ; i++) {
+	  fds[i].fd = (*(usb_pollfds[i])).fd;
+		fds[i].events = (*(usb_pollfds[i])).events;
+	}
+
+	for(;;) {
+		printf("calling poll...\n");
+		ready = poll(fds, nfd, 1000);
+		if (ready) {
+			get_data();
+		}
+	}
+}
+
 void *commfn(void* arg)
 {
 	fd_set readfds, writefds, exceptfds;
@@ -397,7 +459,7 @@ void *commfn(void* arg)
 		to.tv_usec = 0;
 		ready = select(fd+1, &readfds, &writefds, &exceptfds, &to);
 		if (ready) {
-			get_data(fd);
+			get_data();
 		}
 	}
 }
@@ -419,6 +481,40 @@ uchar
 ANT_OpenRxScanMode(uchar chan)
 {
 	return msg_send(MESG_OPEN_RX_SCAN_ID, &chan, 1);
+}
+
+uchar
+ANT_InitUSB()
+{
+	// Initialise LibUSB
+	DEBUG_OUT(3,"Initialising USB");
+	if(libusb_init(&ctx) < 0) {
+		perror("LibUSB Init");
+		return 0;
+	}
+
+	// Find the USB stick
+	// TODO: Turn this naive approach into a more flexible structure
+	// which will handle other VID/PIDs and multiple devices
+	DEBUG_OUT(3,"Finding device");
+	usb_handle = libusb_open_device_with_vid_pid(ctx, USB2_VID, USB2_PID);
+	if (!usb_handle) {
+		perror("Could not find USB stick");
+		return 0;
+	}
+	DEBUG_OUT(3,"Claiming device");
+	if (libusb_claim_interface(usb_handle, 0) != 0) {
+		perror("Couldn't claim interface");
+		return 0;
+	}
+
+	// TODO: Do proper endpoint discovery.  This will work for the current
+	// Garmin stick though
+	ep_in = 0x81;
+	ep_out = 0x01;
+	DEBUG_OUT(3,"Creating thread");
+	if (pthread_create(&commthread, 0, commfn_usb, 0));
+		return 1;
 }
 
 uchar
@@ -455,13 +551,11 @@ ANT_Init(uchar devno, ushort baud)
 {
 	char dev[40];
 
-	if(driver == SERDRIVER)
-	{
+	if(driver == SERDRIVER) {
 		sprintf(dev, "/dev/ttyUSB%d", devno);
 		return ANT_Initf(dev, devno);
-  } else {
-	  // Stub for now
-		return 0;
+	} else {
+		return ANT_InitUSB();
 	}
 }
 

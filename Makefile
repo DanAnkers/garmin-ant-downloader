@@ -1,5 +1,5 @@
 CFLAGS=-g -Wall `xml2-config --cflags`
-LDLIBS=-lpthread -lm `xml2-config --libs`
+LDLIBS=-lpthread -lm `xml2-config --libs` `pkg-config --libs libusb-1.0`
 
 all:	gant
 
